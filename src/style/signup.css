@@ -9,11 +9,6 @@
     padding-bottom: 10px;
 }
 
-.signup-form .form-group .form-control::placeholder,
-.signup-form .form-group .form-control{
-    color: #9e9e9e;
-}
-
 .signup-form button{
     margin-top: 20px;
     font-size: 0.9rem;
