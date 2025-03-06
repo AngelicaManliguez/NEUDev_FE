@@ -25,16 +25,11 @@
     color: #ED5931;
 }
 
-/*STUDENT SIGNUP*/
+/*STUDENT and TEACHER SIGNUP*/
 
 .st-signup-form{
     height: fit-content;
-}
-
-.student-form-container{
-    width: 60%;
-    min-width: 230px;
-    max-width: 100%;
+    min-height: 100vh;
 }
 
 .st-signup-form .form-group{
