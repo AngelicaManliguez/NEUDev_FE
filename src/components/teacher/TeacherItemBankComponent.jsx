@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Modal, Button, Form, Spinner } from "react-bootstrap";
 import "../../style/teacher/activityItems.css";
 import { ProfilePlaygroundNavbarComponent } from "../ProfilePlaygroundNavbarComponent.jsx";
@@ -6,11 +6,12 @@ import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faCaretDown, faCaretUp, faEllipsisV, faEye, faEyeSlash } from '@fortawesome/free-solid-svg-icons';
 
 // ----- Import your API functions -----
+// Notice that we now import getItems (which appends query parameters) instead of getItemsByItemType.
 import {
-  getQuestions,
-  createQuestion,
-  updateQuestion,
-  deleteQuestion,
+  getItems,
+  createItem,
+  updateItem,
+  deleteItem,
   getItemTypes,
   getProgrammingLanguages,
   verifyPassword
@@ -59,7 +60,7 @@ const compilerCodeMap = {
 const codeValidationPatterns = {
   Java: /\b(public\s+class\s+\w+|System\.out\.println|import\s+java\.)\b/,
   Python: /\b(print\s*\(|def\s+\w+\(|import\s+\w+|class\s+\w+|for\s+\w+\s+in|while\s+|if\s+)/,
-  'C#': /\b(using\s+System;|namespace\s+\w+|Console\.WriteLine)\b/
+  "C#": /\b(using\s+System;|namespace\s+\w+|Console\.WriteLine)\b/
 };
 
 function isValidCodeForLanguage(code, languageName) {
@@ -70,82 +71,99 @@ function isValidCodeForLanguage(code, languageName) {
 
 /**
  * Helper functions to determine which timestamp to display:
- * If updated_at exists and is different from created_at, we assume the question was updated.
+ * If updated_at exists and is different from created_at, we assume the item was updated.
  */
-function getDisplayTimestamp(q) {
-  return q.updated_at && q.updated_at !== q.created_at
-    ? new Date(q.updated_at)
-    : new Date(q.created_at);
+function getDisplayTimestamp(item) {
+  return item.updated_at && item.updated_at !== item.created_at
+    ? new Date(item.updated_at)
+    : new Date(item.created_at);
 }
 
-function getDisplayDateString(q) {
-  return q.updated_at && q.updated_at !== q.created_at
-    ? formatDateTime(q.updated_at)
-    : q.created_at
-    ? formatDateTime(q.created_at)
+function getDisplayDateString(item) {
+  return item.updated_at && item.updated_at !== item.created_at
+    ? formatDateTime(item.updated_at)
+    : item.created_at
+    ? formatDateTime(item.created_at)
     : "-";
 }
 
-export default function TeacherQuestionBankComponent() {
-  // -------------------- State: Questions & Item Types --------------------
-  const [questions, setQuestions] = useState([]);
+export default function TeacherItemBankComponent() {
+  // -------------------- State: Items & Item Types --------------------
+  const [items, setItems] = useState([]);
   const [itemTypes, setItemTypes] = useState([]);
   const [selectedItemType, setSelectedItemType] = useState(null);
   const [allProgLanguages, setAllProgLanguages] = useState([]);
-  // "loading" is used for the initial load.
   const [loading, setLoading] = useState(true);
-  // "questionScope" selects between "personal" (Created by Me) and "global" (NEUDev)
-  const [questionScope, setQuestionScope] = useState("personal");
+  const [itemScope, setItemScope] = useState("personal");
 
   // -------------------- Modals --------------------
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [showOutputModal, setShowOutputModal] = useState(false);
+  const [showErrorModal, setShowErrorModal] = useState(false);
 
-  // -------------------- Question Data (for create/edit) --------------------
-  const [questionData, setQuestionData] = useState({
-    questionID: null,
-    questionName: "",
-    questionDesc: "",
-    questionDifficulty: "Beginner",
+  // -------------------- Item Data (for create/edit) --------------------
+  const [itemData, setItemData] = useState({
+    itemID: null,
+    itemName: "",
+    itemDesc: "",
+    itemDifficulty: "Beginner",
     progLangIDs: [],
     testCases: [],
-    questionPoints: 0
+    itemPoints: 0
   });
 
   // -------------------- New State for Password Verification --------------------
   const [deletePassword, setDeletePassword] = useState("");
   const [showDeletePassword, setShowDeletePassword] = useState(false);
 
-  // -------------------- Code Testing --------------------
-  const [code, setCode] = useState("// Write your sample solution here");
+  // -------------------- Code Testing / Terminal State --------------------
+  const [code, setCode] = useState("");
   const [testLangID, setTestLangID] = useState(null);
   const [compiling, setCompiling] = useState(false);
-  const [rawOutput, setRawOutput] = useState("");
-  const [runtimeInput, setRuntimeInput] = useState("");
+  const [terminalLines, setTerminalLines] = useState([]);
+  const [terminalPartialLine, setTerminalPartialLine] = useState("");
+  const [terminalUserInput, setTerminalUserInput] = useState("");
+  const [showTerminalModal, setShowTerminalModal] = useState(false);
+  const [testCaseAdded, setTestCaseAdded] = useState(false);
+  const [errorOutput, setErrorOutput] = useState("");
 
   // -------------------- New State for Date Sorting --------------------
   const [dateSortOrder, setDateSortOrder] = useState("desc");
 
-  // Toggle sort order when clicking on the date column header
-  function toggleDateSortOrder() {
-    setDateSortOrder(prev => (prev === "desc" ? "asc" : "desc"));
+  // WebSocket references for terminal
+  const wsRef = useRef(null);
+  const inputRef = useRef(null);
+  
+  // Ref to track if any error occurred
+  const errorRef = useRef(false);
+
+  // Ref to accumulate output lines
+  const outputRef = useRef("");
+
+  // Helper: place caret at end of contentEditable element
+  function placeCaretAtEnd(el) {
+    if (!el) return;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
   }
 
-  // -------------------- Polling: Fetch Questions --------------------
+  // -------------------- Polling: Fetch Items --------------------
   useEffect(() => {
-    // On mount and when selectedItemType or questionScope changes, fetch questions.
     if (selectedItemType !== null) {
-      fetchQuestions(selectedItemType);
+      fetchItems(selectedItemType);
     }
     const interval = setInterval(() => {
       if (selectedItemType !== null) {
-        fetchQuestions(selectedItemType);
+        fetchItems(selectedItemType);
       }
     }, 10000);
     return () => clearInterval(interval);
-  }, [selectedItemType, questionScope]);
+  }, [selectedItemType, itemScope]);
 
   // -------------------- Lifecycle: Fetch Initial Data --------------------
   useEffect(() => {
@@ -155,14 +173,18 @@ export default function TeacherQuestionBankComponent() {
 
   useEffect(() => {
     if (showCreateModal || showEditModal) {
-      if (questionData.progLangIDs.length > 0) {
-        setTestLangID(questionData.progLangIDs[0]);
+      if (itemData.progLangIDs.length > 0) {
+        setTestLangID(itemData.progLangIDs[0]);
       } else {
         setTestLangID(null);
       }
-      setRuntimeInput("");
+      // Reset terminal-related state for each new run
+      setTerminalLines([]);
+      setTerminalPartialLine("");
+      setTerminalUserInput("");
+      setTestCaseAdded(false);
     }
-  }, [showCreateModal, showEditModal, questionData.progLangIDs]);
+  }, [showCreateModal, showEditModal, itemData.progLangIDs]);
 
   // -------------------- Derived: Check if selected item type is Console App --------------------
   const isConsoleApp = itemTypes.find(
@@ -197,28 +219,27 @@ export default function TeacherQuestionBankComponent() {
     }
   }
 
-  async function fetchQuestions(itemTypeID) {
-    // We keep the old questions until new ones arrive.
+  // Note: We now use getItems() which accepts query parameters.
+  async function fetchItems(itemTypeID) {
     setLoading(true);
     try {
       const teacherID = sessionStorage.getItem("userID");
-      // Pass scope and teacherID as query parameters.
-      const response = await getQuestions(itemTypeID, { scope: questionScope, teacherID });
+      // Passing both scope and teacherID in the query object
+      const response = await getItems(itemTypeID, { scope: itemScope, teacherID });
       if (!response || response.error || !Array.isArray(response)) {
-        // Do not clear existing questions if an error occurs.
-        console.error("Error fetching questions:", response?.error);
+        console.error("Error fetching items:", response?.error);
       } else {
-        setQuestions(response);
+        setItems(response);
       }
     } catch (error) {
-      console.error("Error fetching questions:", error);
+      console.error("Error fetching items:", error);
     } finally {
       setLoading(false);
     }
   }
 
   async function handleDelete() {
-    if (!questionData.questionID) return;
+    if (!itemData.itemID) return;
     const teacherEmail = sessionStorage.getItem("user_email");
     if (!teacherEmail) {
       alert("Teacher email not found. Please log in again.");
@@ -229,11 +250,11 @@ export default function TeacherQuestionBankComponent() {
       alert(verification.error);
       return;
     }
-    const resp = await deleteQuestion(questionData.questionID);
+    const resp = await deleteItem(itemData.itemID);
     if (!resp.error) {
-      alert("Question deleted successfully.");
-      setQuestions(prev => (prev || []).filter(q => q.questionID !== questionData.questionID));
-      fetchQuestions(selectedItemType);
+      alert("Item deleted successfully.");
+      setItems(prev => (prev || []).filter(i => i.itemID !== itemData.itemID));
+      fetchItems(selectedItemType);
       setShowDeleteModal(false);
       setDeletePassword("");
     } else {
@@ -243,61 +264,60 @@ export default function TeacherQuestionBankComponent() {
 
   async function handleCreateOrUpdate() {
     if (
-      !questionData.questionName.trim() ||
-      !questionData.questionDesc.trim() ||
-      questionData.progLangIDs.length === 0
+      !itemData.itemName.trim() ||
+      !itemData.itemDesc.trim() ||
+      itemData.progLangIDs.length === 0
     ) {
       alert("Please fill in all required fields (name, description, at least one language).");
       return;
     }
-    if (isConsoleApp && (questionData.testCases || []).length === 0) {
-      alert("Please add at least one test case for this question.");
+    if (isConsoleApp && (itemData.testCases || []).length === 0) {
+      alert("Please add at least one test case for this item.");
       return;
     }
     if (isConsoleApp) {
-      for (let i = 0; i < questionData.testCases.length; i++) {
-        const tc = questionData.testCases[i];
+      for (let i = 0; i < itemData.testCases.length; i++) {
+        const tc = itemData.testCases[i];
         if (tc.testCasePoints === "" || isNaN(Number(tc.testCasePoints)) || Number(tc.testCasePoints) < 0) {
           alert(`Please enter a valid points value for test case ${i + 1}.`);
           return;
         }
       }
     }
-    const computedQuestionPoints = isConsoleApp
-      ? questionData.testCases.reduce(
+    const computedItemPoints = isConsoleApp
+      ? itemData.testCases.reduce(
           (sum, tc) => sum + Number(tc.testCasePoints || 0),
           0
         )
-      : Number(questionData.questionPoints);
+      : Number(itemData.itemPoints);
     const payload = {
       itemTypeID: selectedItemType,
-      progLangIDs: questionData.progLangIDs,
-      questionName: questionData.questionName.trim(),
-      questionDesc: questionData.questionDesc.trim(),
-      questionDifficulty: questionData.questionDifficulty,
-      questionPoints: computedQuestionPoints,
+      progLangIDs: itemData.progLangIDs,
+      itemName: itemData.itemName.trim(),
+      itemDesc: itemData.itemDesc.trim(),
+      itemDifficulty: itemData.itemDifficulty,
+      itemPoints: computedItemPoints,
       testCases: isConsoleApp
-        ? questionData.testCases.filter(tc =>
-            tc.inputData.trim() !== "" || tc.expectedOutput.trim() !== ""
+        ? itemData.testCases.filter(tc =>
+            tc.expectedOutput.trim() !== ""
           )
         : []
     };
-    // For personal questions, add teacherID to payload.
-    if (showCreateModal && questionScope === "personal") {
+    if (showCreateModal && itemScope === "personal") {
       payload.teacherID = sessionStorage.getItem("userID");
     }
     let resp;
     if (showCreateModal) {
-      resp = await createQuestion(payload);
+      resp = await createItem(payload);
     } else if (showEditModal) {
-      if (!questionData.questionID) {
-        alert("No question selected to update.");
+      if (!itemData.itemID) {
+        alert("No item selected to update.");
         return;
       }
-      resp = await updateQuestion(questionData.questionID, payload);
+      resp = await updateItem(itemData.itemID, payload);
     }
     if (!resp.error) {
-      fetchQuestions(selectedItemType);
+      fetchItems(selectedItemType);
       setShowCreateModal(false);
       setShowEditModal(false);
     } else {
@@ -306,11 +326,136 @@ export default function TeacherQuestionBankComponent() {
   }
 
   function handleRemoveTestCase(index) {
-    const updated = questionData.testCases.filter((_, i) => i !== index);
-    setQuestionData({ ...questionData, testCases: updated });
+    const updated = itemData.testCases.filter((_, i) => i !== index);
+    setItemData({ ...itemData, testCases: updated });
   }
 
-  async function handleRunCode() {
+  // -------------------- WebSocket Setup for NEUDev Terminal --------------------
+  useEffect(() => {
+    const ws = new WebSocket("https://neudevcompiler-production.up.railway.app");
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      console.log("WebSocket connected");
+    };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.type === "stdout") {
+        if ((data.data ?? "").includes("Traceback")) {
+          errorRef.current = true;
+        }
+        handleStdout(data.data ?? "");
+      } 
+      else if (data.type === "stderr") {
+        errorRef.current = true;
+        finalizeLine(`Error: ${data.data ?? ""}`, false); 
+      } 
+      else if (data.type === "exit") {
+        if (terminalPartialLine || terminalUserInput) {
+          finalizeLine(terminalPartialLine + terminalUserInput, false);
+          setTerminalPartialLine("");
+          setTerminalUserInput("");
+        }
+        finalizeLine("\n\n>>> Program Terminated", true);
+        setCompiling(false);
+        const finalOutput = outputRef.current.trim();
+        if (errorRef.current || finalOutput.includes("Error:") || finalOutput.includes("Traceback")) {
+          setErrorOutput(finalOutput);
+          setShowErrorModal(true);
+        } else {
+          if (finalOutput) {
+            const newTC = {
+              expectedOutput: finalOutput,
+              testCasePoints: "",
+              isHidden: false
+            };
+            setItemData(prev => ({
+              ...prev,
+              testCases: [...prev.testCases, newTC]
+            }));
+            setTestCaseAdded(true);
+          }
+        }
+      }
+    };
+
+    ws.onclose = () => {
+      console.log("WebSocket connection closed");
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, []);
+
+  // Handler for stdout from WebSocket
+  function handleStdout(newData) {
+    let buffer = terminalPartialLine + newData;
+    const splitLines = buffer.split("\n");
+    for (let i = 0; i < splitLines.length - 1; i++) {
+      finalizeLine(splitLines[i]);
+    }
+    const lastPiece = splitLines[splitLines.length - 1];
+    if (newData.endsWith("\n")) {
+      if (lastPiece.trim() !== "") {
+        finalizeLine(lastPiece);
+      }
+      setTerminalPartialLine("");
+    } else {
+      setTerminalPartialLine(lastPiece);
+    }
+  }
+  
+  // --------------------
+  // finalizeLine
+  // --------------------
+  function finalizeLine(text, skipOutput = false) {
+    setTerminalLines(prev => [...prev, text]);
+    if (!skipOutput) {
+      outputRef.current += text + "\n";
+    }
+  }
+
+  const handleTerminalClick = () => {
+    if (inputRef.current) {
+      inputRef.current.focus();
+      placeCaretAtEnd(inputRef.current);
+    }
+  };
+
+  const handleInputChange = (e) => {
+    setTerminalUserInput(e.currentTarget.textContent);
+  };
+
+  const handleInputKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "input", data: terminalUserInput }));
+      }
+      setTerminalPartialLine("");
+      setTerminalUserInput("");
+      if (inputRef.current) {
+        inputRef.current.textContent = "";
+      }
+    }
+  };
+
+  const handleCloseTerminal = () => {
+    if (compiling && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "kill" }));
+    }
+    setCompiling(false);
+    setShowTerminalModal(false);
+    setTerminalLines([]);
+    setTerminalPartialLine("");
+    setTerminalUserInput("");
+  };
+
+  const handleRunCode = async () => {
     if (!isConsoleApp) return;
     if (!testLangID) {
       alert("Please select which language to test with.");
@@ -334,51 +479,65 @@ export default function TeacherQuestionBankComponent() {
       alert("Please enter some code before running.");
       return;
     }
-    setCompiling(true);
-    setRawOutput("");
-    try {
-      const response = await fetch("https://neudevcompiler-production.up.railway.app", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code,
-          language: shortCode,
-          input: runtimeInput
-        })
-      });
-      const data = await response.json();
-      console.log("[Compiler Response]", response.status, data);
-      if (!response.ok || data.error) {
-        let errorMsg = data.error || data.stderr || "Something went wrong";
-        setRawOutput(`Error: ${errorMsg}`);
-      } else {
-        const actualOutput = (data.output || "").trim();
-        const finalOutput = actualOutput.length > 0 ? actualOutput : "(No output returned by the compiler)";
-        setRawOutput(finalOutput);
-        const newTC = {
-          inputData: runtimeInput,
-          expectedOutput: finalOutput,
-          testCasePoints: ""
-        };
-        setQuestionData({
-          ...questionData,
-          testCases: [...questionData.testCases, newTC],
-        });
-      }
-    } catch (error) {
-      setRawOutput(`Exception: ${error.message}`);
-    } finally {
-      setCompiling(false);
-      setShowOutputModal(true);
-    }
-  }
 
-  const sortedQuestions = [...questions].sort((a, b) => {
+    setTerminalLines([]);
+    setTerminalPartialLine("");
+    setTerminalUserInput("");
+    setTestCaseAdded(false);
+    errorRef.current = false;
+    outputRef.current = "";
+
+    setShowTerminalModal(true);
+    setCompiling(true);
+
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: "init",
+          language: shortCode,
+          code: code,
+          input: ""
+        })
+      );
+    } else {
+      finalizeLine("Error: WebSocket not connected.", false);
+      errorRef.current = true;
+      setCompiling(false);
+    }
+  };
+
+  const sortedItems = [...items].sort((a, b) => {
     const dateA = getDisplayTimestamp(a);
     const dateB = getDisplayTimestamp(b);
     return dateSortOrder === "asc" ? dateA - dateB : dateB - dateA;
   });
 
+  function AutoResizeTextarea({ value, ...props }) {
+    const textareaRef = useRef(null);
+    useEffect(() => {
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+        textareaRef.current.style.height = textareaRef.current.scrollHeight + "px";
+      }
+    }, [value]);
+    return (
+      <Form.Control
+        as="textarea"
+        ref={textareaRef}
+        value={value}
+        rows={1}
+        style={{
+          whiteSpace: "pre-wrap",
+          overflow: "hidden",
+          resize: "none"
+        }}
+        {...props}
+      />
+    );
+  }
+
+  // -------------------- Render --------------------
   return (
     <div className="activity-items">
       <ProfilePlaygroundNavbarComponent />
@@ -387,27 +546,27 @@ export default function TeacherQuestionBankComponent() {
       <header className="activity-header">
         <div className="header-content">
           <div className="left-indicator"></div>
-          <h2 className="activity-title">Question Bank</h2>
+          <h2 className="activity-title">Item Bank</h2>
           <button
             className="create-btn"
             onClick={() => {
-              setQuestionData({
-                questionID: null,
-                questionName: "",
-                questionDesc: "",
-                questionDifficulty: "Beginner",
+              setItemData({
+                itemID: null,
+                itemName: "",
+                itemDesc: "",
+                itemDifficulty: "Beginner",
                 progLangIDs: [],
                 testCases: [],
-                questionPoints: 0,
+                itemPoints: 0
               });
-              setCode("// Write your sample solution here");
-              setRuntimeInput("");
-              setRawOutput("");
+              setTerminalLines([]);
+              setTerminalPartialLine("");
+              setTerminalUserInput("");
               setTestLangID(null);
               setShowCreateModal(true);
             }}
           >
-            + Add Question
+            + Add Item
           </button>
         </div>
       </header>
@@ -431,29 +590,29 @@ export default function TeacherQuestionBankComponent() {
         </select>
       </div>
 
-      {/* Question Creator Selector */}
+      {/* Item Creator Selector */}
       <div className="filter-section">
-        <label>Question Creator:</label>
+        <label>Item Creator:</label>
         <select
-          value={questionScope}
-          onChange={(e) => setQuestionScope(e.target.value)}
+          value={itemScope}
+          onChange={(e) => setItemScope(e.target.value)}
         >
           <option value="personal">Created by Me</option>
           <option value="global">NEUDev</option>
         </select>
       </div>
 
-      {/* Table of Questions */}
+      {/* Table of Items */}
       <div className="table-wrapper">
         <table className="item-table">
           <thead>
             <tr>
-              <th>QUESTION NAME</th>
+              <th>ITEM NAME</th>
               <th>DIFFICULTY</th>
               <th>POINTS</th>
               <th>LANGUAGES</th>
               {isConsoleApp && <th>TEST CASES</th>}
-              <th onClick={toggleDateSortOrder} style={{ cursor: "pointer" }}>
+              <th onClick={() => setDateSortOrder(prev => (prev === "desc" ? "asc" : "desc"))} style={{ cursor: "pointer" }}>
                 DATE &amp; TIME CREATED/UPDATED{" "}
                 <FontAwesomeIcon
                   icon={dateSortOrder === "asc" ? faCaretUp : faCaretDown}
@@ -464,26 +623,26 @@ export default function TeacherQuestionBankComponent() {
             </tr>
           </thead>
           <tbody>
-            {loading && questions.length === 0 ? (
+            {loading && items.length === 0 ? (
               <tr>
                 <td colSpan="7" style={{ textAlign: "center" }}>
                   Loading...
                 </td>
               </tr>
-            ) : !loading && sortedQuestions.length === 0 ? (
+            ) : !loading && sortedItems.length === 0 ? (
               <tr>
                 <td colSpan="7" style={{ textAlign: "center" }}>
-                  No questions found.
+                  No items found.
                 </td>
               </tr>
             ) : (
-              sortedQuestions.map((q) => {
-                const progLangArray = q.programming_languages || [];
+              sortedItems.map((item) => {
+                const progLangArray = item.programming_languages || [];
                 return (
-                  <tr key={q.questionID}>
-                    <td>{q.questionName}</td>
-                    <td>{q.questionDifficulty}</td>
-                    <td>{q.questionPoints || "-"}</td>
+                  <tr key={item.itemID}>
+                    <td>{item.itemName}</td>
+                    <td>{item.itemDifficulty}</td>
+                    <td>{item.itemPoints || "-"}</td>
                     <td>
                       {progLangArray.length > 0
                         ? progLangArray.map((langObj, idx) => {
@@ -511,33 +670,33 @@ export default function TeacherQuestionBankComponent() {
                     </td>
                     {isConsoleApp && (
                       <td>
-                        {q.test_cases && q.test_cases.length > 0
-                          ? `${q.test_cases.length} test case(s)`
+                        {item.test_cases && item.test_cases.length > 0
+                          ? `${item.test_cases.length} test case(s)`
                           : "No test cases"}
                       </td>
                     )}
-                    <td>{getDisplayDateString(q)}</td>
+                    <td>{getDisplayDateString(item)}</td>
                     <td>
                       <button
                         className="edit-btn"
                         onClick={() => {
-                          const plIDs = (q.programming_languages || []).map(l => l.progLangID);
-                          setQuestionData({
-                            questionID: q.questionID,
-                            questionName: q.questionName,
-                            questionDesc: q.questionDesc,
-                            questionDifficulty: q.questionDifficulty,
+                          const plIDs = (item.programming_languages || []).map(l => l.progLangID);
+                          setItemData({
+                            itemID: item.itemID,
+                            itemName: item.itemName,
+                            itemDesc: item.itemDesc,
+                            itemDifficulty: item.itemDifficulty,
                             progLangIDs: plIDs,
-                            testCases: (q.test_cases || []).map(tc => ({
-                              inputData: tc.inputData,
+                            testCases: (item.test_cases || []).map(tc => ({
                               expectedOutput: tc.expectedOutput,
-                              testCasePoints: tc.testCasePoints ?? ""
+                              testCasePoints: tc.testCasePoints ?? "",
+                              isHidden: tc.isHidden ?? false
                             })),
-                            questionPoints: q.questionPoints || 0
+                            itemPoints: item.itemPoints || 0
                           });
-                          setCode("// Write your sample solution here");
-                          setRuntimeInput("");
-                          setRawOutput("");
+                          setTerminalLines([]);
+                          setTerminalPartialLine("");
+                          setTerminalUserInput("");
                           setTestLangID(plIDs.length > 0 ? plIDs[0] : null);
                           setShowEditModal(true);
                         }}
@@ -547,19 +706,19 @@ export default function TeacherQuestionBankComponent() {
                       <button
                         className="delete-btn"
                         onClick={() => {
-                          const plIDs = (q.programming_languages || []).map(l => l.progLangID);
-                          setQuestionData({
-                            questionID: q.questionID,
-                            questionName: q.questionName,
-                            questionDesc: q.questionDesc,
-                            questionDifficulty: q.questionDifficulty,
+                          const plIDs = (item.programming_languages || []).map(l => l.progLangID);
+                          setItemData({
+                            itemID: item.itemID,
+                            itemName: item.itemName,
+                            itemDesc: item.itemDesc,
+                            itemDifficulty: item.itemDifficulty,
                             progLangIDs: plIDs,
-                            testCases: (q.test_cases || []).map(tc => ({
-                              inputData: tc.inputData,
+                            testCases: (item.test_cases || []).map(tc => ({
                               expectedOutput: tc.expectedOutput,
-                              testCasePoints: tc.testCasePoints ?? ""
+                              testCasePoints: tc.testCasePoints ?? "",
+                              isHidden: tc.isHidden ?? false
                             })),
-                            questionPoints: q.questionPoints || 0
+                            itemPoints: item.itemPoints || 0
                           });
                           setDeletePassword("");
                           setShowDeleteModal(true);
@@ -589,32 +748,32 @@ export default function TeacherQuestionBankComponent() {
       >
         <Modal.Header closeButton>
           <Modal.Title>
-            {showCreateModal ? "Add Question" : "Edit Question"}
+            {showCreateModal ? "Add Item" : "Edit Item"}
           </Modal.Title>
         </Modal.Header>
         <Modal.Body>
           <Form>
-            {/* Question Name */}
+            {/* Item Name */}
             <Form.Group className="mb-3">
-              <Form.Label>Question Name</Form.Label>
+              <Form.Label>Item Name</Form.Label>
               <Form.Control
                 type="text"
-                value={questionData.questionName}
+                value={itemData.itemName}
                 onChange={(e) =>
-                  setQuestionData({ ...questionData, questionName: e.target.value })
+                  setItemData({ ...itemData, itemName: e.target.value })
                 }
               />
             </Form.Group>
 
-            {/* Question Description */}
+            {/* Item Description */}
             <Form.Group className="mb-3">
-              <Form.Label>Question Description</Form.Label>
+              <Form.Label>Item Description</Form.Label>
               <Form.Control
                 as="textarea"
                 rows={3}
-                value={questionData.questionDesc}
+                value={itemData.itemDesc}
                 onChange={(e) =>
-                  setQuestionData({ ...questionData, questionDesc: e.target.value })
+                  setItemData({ ...itemData, itemDesc: e.target.value })
                 }
               />
             </Form.Group>
@@ -623,9 +782,9 @@ export default function TeacherQuestionBankComponent() {
             <Form.Group className="mb-3">
               <Form.Label>Difficulty</Form.Label>
               <Form.Select
-                value={questionData.questionDifficulty}
+                value={itemData.itemDifficulty}
                 onChange={(e) =>
-                  setQuestionData({ ...questionData, questionDifficulty: e.target.value })
+                  setItemData({ ...itemData, itemDifficulty: e.target.value })
                 }
               >
                 <option value="Beginner">Beginner</option>
@@ -634,14 +793,14 @@ export default function TeacherQuestionBankComponent() {
               </Form.Select>
             </Form.Group>
 
-            {/* Conditional Question Points */}
+            {/* Conditional Item Points */}
             {isConsoleApp ? (
               <Form.Group className="mb-3">
-                <Form.Label>Total Question Points (auto-calculated from test cases)</Form.Label>
+                <Form.Label>Total Item Points (auto-calculated from test cases)</Form.Label>
                 <Form.Control
                   type="number"
                   value={
-                    questionData.testCases.reduce(
+                    itemData.testCases.reduce(
                       (sum, tc) => sum + Number(tc.testCasePoints || 0),
                       0
                     )
@@ -651,12 +810,12 @@ export default function TeacherQuestionBankComponent() {
               </Form.Group>
             ) : (
               <Form.Group className="mb-3">
-                <Form.Label>Question Points</Form.Label>
+                <Form.Label>Item Points</Form.Label>
                 <Form.Control
                   type="number"
-                  value={questionData.questionPoints}
+                  value={itemData.itemPoints}
                   onChange={(e) =>
-                    setQuestionData({ ...questionData, questionPoints: e.target.value })
+                    setItemData({ ...itemData, itemPoints: e.target.value })
                   }
                 />
               </Form.Group>
@@ -670,16 +829,16 @@ export default function TeacherQuestionBankComponent() {
                   type="checkbox"
                   label="Applicable to all"
                   checked={
-                    questionData.progLangIDs.length > 0 &&
-                    questionData.progLangIDs.length === allProgLanguages.length
+                    itemData.progLangIDs.length > 0 &&
+                    itemData.progLangIDs.length === allProgLanguages.length
                   }
                   onChange={(e) => {
                     if (e.target.checked) {
                       const allIDs = allProgLanguages.map(lang => lang.progLangID);
-                      setQuestionData({ ...questionData, progLangIDs: allIDs });
+                      setItemData({ ...itemData, progLangIDs: allIDs });
                       if (allIDs.length > 0) setTestLangID(allIDs[0]);
                     } else {
-                      setQuestionData({ ...questionData, progLangIDs: [] });
+                      setItemData({ ...itemData, progLangIDs: [] });
                       setTestLangID(null);
                     }
                   }}
@@ -690,16 +849,16 @@ export default function TeacherQuestionBankComponent() {
                   key={lang.progLangID}
                   type="checkbox"
                   label={lang.progLangName}
-                  checked={questionData.progLangIDs.includes(lang.progLangID)}
+                  checked={itemData.progLangIDs.includes(lang.progLangID)}
                   onChange={() => {
-                    const current = questionData.progLangIDs || [];
+                    const current = itemData.progLangIDs || [];
                     let updated;
                     if (current.includes(lang.progLangID)) {
                       updated = current.filter(id => id !== lang.progLangID);
                     } else {
                       updated = [...current, lang.progLangID];
                     }
-                    setQuestionData({ ...questionData, progLangIDs: updated });
+                    setItemData({ ...itemData, progLangIDs: updated });
                     if (testLangID === lang.progLangID) setTestLangID(null);
                   }}
                 />
@@ -709,7 +868,7 @@ export default function TeacherQuestionBankComponent() {
             {/* Conditional rendering for Console App only */}
             {isConsoleApp && (
               <>
-                {questionData.progLangIDs.length > 1 && (
+                {itemData.progLangIDs.length > 1 && (
                   <Form.Group className="mb-3">
                     <Form.Label>Select Language to Test This Code</Form.Label>
                     <Form.Select
@@ -717,7 +876,7 @@ export default function TeacherQuestionBankComponent() {
                       onChange={(e) => setTestLangID(parseInt(e.target.value, 10))}
                     >
                       <option value="">-- Pick a language --</option>
-                      {questionData.progLangIDs.map((langID) => {
+                      {itemData.progLangIDs.map((langID) => {
                         const found = allProgLanguages.find(l => l.progLangID === langID);
                         return (
                           <option key={langID} value={langID}>
@@ -731,7 +890,7 @@ export default function TeacherQuestionBankComponent() {
 
                 <Form.Group className="mb-3">
                   <Form.Label>Test Cases (added after each successful run)</Form.Label>
-                  {(questionData.testCases || []).map((tc, index) => (
+                  {(itemData.testCases || []).map((tc, index) => (
                     <div
                       key={index}
                       style={{
@@ -740,18 +899,9 @@ export default function TeacherQuestionBankComponent() {
                         marginBottom: "10px"
                       }}
                     >
-                      <Form.Control
-                        type="text"
-                        placeholder="Input Data"
-                        value={tc.inputData}
+                      <AutoResizeTextarea
                         readOnly
-                        style={{ marginBottom: "5px" }}
-                      />
-                      <Form.Control
-                        type="text"
-                        placeholder="Expected Output"
                         value={tc.expectedOutput}
-                        readOnly
                         style={{ marginBottom: "5px" }}
                       />
                       <Form.Control
@@ -759,10 +909,21 @@ export default function TeacherQuestionBankComponent() {
                         placeholder="Enter points for this test case"
                         value={tc.testCasePoints ?? ""}
                         onChange={(e) => {
-                          const updatedTestCases = [...questionData.testCases];
+                          const updatedTestCases = [...itemData.testCases];
                           updatedTestCases[index].testCasePoints = e.target.value;
-                          setQuestionData({ ...questionData, testCases: updatedTestCases });
+                          setItemData({ ...itemData, testCases: updatedTestCases });
                         }}
+                      />
+                      <Form.Check
+                        type="checkbox"
+                        label="Hidden"
+                        checked={tc.isHidden || false}
+                        onChange={(e) => {
+                          const updatedTestCases = [...itemData.testCases];
+                          updatedTestCases[index].isHidden = e.target.checked;
+                          setItemData({ ...itemData, testCases: updatedTestCases });
+                        }}
+                        style={{ marginTop: "5px" }}
                       />
                       <Button
                         variant="outline-danger"
@@ -777,22 +938,13 @@ export default function TeacherQuestionBankComponent() {
                 </Form.Group>
 
                 <Form.Group className="mb-3">
-                  <Form.Label>Sample Code (for testing)</Form.Label>
+                  <Form.Label>Code solution: </Form.Label>
                   <Form.Control
                     as="textarea"
-                    rows={8}
+                    rows={15}
                     value={code}
                     onChange={(e) => setCode(e.target.value)}
-                  />
-                </Form.Group>
-
-                <Form.Group className="mb-3">
-                  <Form.Label>Runtime Input (for this run)</Form.Label>
-                  <Form.Control
-                    type="text"
-                    placeholder="Enter input for the code (if you have an input)"
-                    value={runtimeInput}
-                    onChange={(e) => setRuntimeInput(e.target.value)}
+                    placeholder="Write your code solution here"
                   />
                 </Form.Group>
 
@@ -828,10 +980,10 @@ export default function TeacherQuestionBankComponent() {
         centered
       >
         <Modal.Header closeButton>
-          <Modal.Title>Delete Question</Modal.Title>
+          <Modal.Title>Delete Item</Modal.Title>
         </Modal.Header>
         <Modal.Body>
-          <p>Are you sure you want to delete the question “{questionData.questionName}”?</p>
+          <p>Are you sure you want to delete the item “{itemData.itemName}”?</p>
           <Form.Group controlId="deletePassword">
             <Form.Label>Enter your password</Form.Label>
             <div style={{ display: "flex", alignItems: "center" }}>
@@ -860,25 +1012,88 @@ export default function TeacherQuestionBankComponent() {
         </Modal.Footer>
       </Modal>
 
-      {/* Raw Output Modal */}
+      {/* -------------------- Terminal Modal for NEUDev -------------------- */}
       <Modal
-        show={showOutputModal}
-        onHide={() => setShowOutputModal(false)}
+        show={showTerminalModal}
+        onHide={handleCloseTerminal}
         size="lg"
+        backdrop="static"
+        keyboard={false}
+        centered
+        className="dark-terminal-modal"
       >
+        <Modal.Header closeButton className="dark-terminal-modal-header">
+          <Modal.Title>NEUDev Terminal</Modal.Title>
+        </Modal.Header>
+        <Modal.Body className="dark-terminal-modal-body">
+          <div
+            className="terminal"
+            style={{
+              backgroundColor: "#1e1e1e",
+              color: "#fff",
+              padding: "10px",
+              fontFamily: "monospace",
+              minHeight: "250px",
+              overflowY: "auto"
+            }}
+            onClick={handleTerminalClick}
+          >
+            {terminalLines.map((line, idx) => (
+              <div key={idx} style={{ whiteSpace: "pre-wrap" }}>
+                {line}
+              </div>
+            ))}
+            <div style={{ whiteSpace: "pre-wrap" }}>
+              <span>{terminalPartialLine}</span>
+              <span
+                ref={inputRef}
+                contentEditable
+                suppressContentEditableWarning
+                style={{ outline: "none" }}
+                onInput={handleInputChange}
+                onKeyDown={handleInputKeyDown}
+              />
+            </div>
+          </div>
+        </Modal.Body>
+      </Modal>
+
+      {/* -------------------- Error Modal: Prompt to Add Error as Test Case -------------------- */}
+      <Modal show={showErrorModal} onHide={() => setShowErrorModal(false)} centered>
         <Modal.Header closeButton>
-          <Modal.Title>Code Output</Modal.Title>
+          <Modal.Title>Compilation Error</Modal.Title>
         </Modal.Header>
         <Modal.Body>
-          {rawOutput ? (
-            <pre style={{ whiteSpace: "pre-wrap" }}>{rawOutput}</pre>
-          ) : (
-            <p>No raw output available.</p>
-          )}
+          <p>The code encountered an error during execution:</p>
+          <pre style={{
+            backgroundColor: '#f8d7da',
+            padding: '10px',
+            borderRadius: '5px',
+            maxHeight: '200px',
+            overflowY: 'auto'
+          }}>
+            {errorOutput}
+          </pre>
+          <p>Do you want to add this error output as a test case?</p>
         </Modal.Body>
         <Modal.Footer>
-          <Button variant="secondary" onClick={() => setShowOutputModal(false)}>
-            Close
+          <Button variant="secondary" onClick={() => setShowErrorModal(false)}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => {
+            const newTC = {
+              expectedOutput: errorOutput,
+              testCasePoints: "",
+              isHidden: false
+            };
+            setItemData(prev => ({
+              ...prev,
+              testCases: [...prev.testCases, newTC]
+            }));
+            setTestCaseAdded(true);
+            setShowErrorModal(false);
+          }}>
+            Add as Test Case
           </Button>
         </Modal.Footer>
       </Modal>

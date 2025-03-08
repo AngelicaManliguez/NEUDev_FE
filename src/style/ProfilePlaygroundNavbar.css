@@ -31,6 +31,37 @@
     .profile-playground-navbar .navbar-text{
         font-size: 0.9rem;
     }
+
+    .dashboard-navbar .ping {
+        font-size: 0.8rem;
+    }
+    
+    .dashboard-navbar .bi{
+        font-size: 0.95rem;
+    }
+}
+
+@media (max-width: 576px) {
+    .profile-playground-navbar {
+        height: 9vh;
+    }
+    
+    .profile-playground-navbar .nav-link{
+        font-size: 1.05rem;
+        margin-left: 10px;
+    }
+    
+    .profile-playground-navbar .navbar-text{
+        font-size: 0.85rem;
+    }
+
+    .dashboard-navbar .ping {
+        font-size: 0.8rem;
+    }
+    
+    .dashboard-navbar .bi{
+        font-size: 0.95rem;
+    }
 }
 
 @media (max-width: 425px) {
